@@ -1,19 +1,24 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { ArrowLeft, CheckCircle, CreditCard, Truck } from 'lucide-react';
+import { ArrowLeft, CheckCircle, CreditCard, Truck, Loader2 } from 'lucide-react';
 import Navbar from '@/components/Navbar';
 import Footer from '@/components/Footer';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { useCart } from '@/context/CartContext';
+import { useAuth } from '@/context/AuthContext';
 import { useToast } from '@/hooks/use-toast';
+import { supabase } from '@/integrations/supabase/client';
 
 const Checkout: React.FC = () => {
   const { cartItems, totalPrice, clearCart } = useCart();
+  const { user, loading: authLoading } = useAuth();
   const navigate = useNavigate();
   const { toast } = useToast();
   const [isOrderPlaced, setIsOrderPlaced] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [orderNumber, setOrderNumber] = useState('');
   const [formData, setFormData] = useState({
     fullName: '',
     email: '',
@@ -26,6 +31,35 @@ const Checkout: React.FC = () => {
   const deliveryFee = totalPrice >= 500 ? 0 : 40;
   const grandTotal = totalPrice + deliveryFee;
 
+  // Load profile data if user is logged in
+  useEffect(() => {
+    if (user) {
+      setFormData(prev => ({
+        ...prev,
+        email: user.email || '',
+      }));
+
+      // Load profile data
+      supabase
+        .from('profiles')
+        .select('*')
+        .eq('user_id', user.id)
+        .maybeSingle()
+        .then(({ data }) => {
+          if (data) {
+            setFormData(prev => ({
+              ...prev,
+              fullName: data.full_name || '',
+              phone: data.phone || '',
+              address: data.address || '',
+              city: data.city || '',
+              pincode: data.pincode || '',
+            }));
+          }
+        });
+    }
+  }, [user]);
+
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setFormData(prev => ({
       ...prev,
@@ -33,7 +67,7 @@ const Checkout: React.FC = () => {
     }));
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
     // Simple validation
@@ -46,10 +80,93 @@ const Checkout: React.FC = () => {
       return;
     }
 
-    // Simulate order placement
-    setIsOrderPlaced(true);
-    clearCart();
+    // Require login for checkout
+    if (!user) {
+      toast({
+        title: "Login required",
+        description: "Please login to complete your order",
+        variant: "destructive"
+      });
+      navigate('/auth');
+      return;
+    }
+
+    setIsSubmitting(true);
+
+    try {
+      const newOrderNumber = `GS${Date.now().toString().slice(-8)}`;
+
+      // Create order
+      const { data: orderData, error: orderError } = await supabase
+        .from('orders')
+        .insert({
+          user_id: user.id,
+          order_number: newOrderNumber,
+          status: 'pending',
+          total_amount: totalPrice,
+          delivery_fee: deliveryFee,
+          full_name: formData.fullName,
+          email: formData.email,
+          phone: formData.phone,
+          address: formData.address,
+          city: formData.city,
+          pincode: formData.pincode,
+        })
+        .select()
+        .single();
+
+      if (orderError) throw orderError;
+
+      // Create order items
+      const orderItems = cartItems.map(item => ({
+        order_id: orderData.id,
+        product_id: item.id,
+        product_name: item.name,
+        product_price: item.price,
+        product_image: item.image,
+        quantity: item.quantity,
+      }));
+
+      const { error: itemsError } = await supabase
+        .from('order_items')
+        .insert(orderItems);
+
+      if (itemsError) throw itemsError;
+
+      // Update profile with delivery info for future orders
+      await supabase
+        .from('profiles')
+        .update({
+          full_name: formData.fullName,
+          phone: formData.phone,
+          address: formData.address,
+          city: formData.city,
+          pincode: formData.pincode,
+        })
+        .eq('user_id', user.id);
+
+      setOrderNumber(newOrderNumber);
+      setIsOrderPlaced(true);
+      clearCart();
+    } catch (error) {
+      console.error('Error placing order:', error);
+      toast({
+        title: "Order failed",
+        description: "There was an error placing your order. Please try again.",
+        variant: "destructive"
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
   };
+
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <Loader2 className="w-8 h-8 animate-spin text-primary" />
+      </div>
+    );
+  }
 
   if (cartItems.length === 0 && !isOrderPlaced) {
     navigate('/cart');
@@ -70,18 +187,18 @@ const Checkout: React.FC = () => {
               Thank you for shopping with Goel Stores
             </p>
             <p className="text-sm text-muted-foreground mb-8">
-              Order #GS{Date.now().toString().slice(-8)} has been placed successfully.
-              You'll receive a confirmation email shortly.
+              Order #{orderNumber} has been placed successfully.
+              You can track your order in the My Orders section.
             </p>
             <div className="flex flex-col sm:flex-row gap-4 justify-center">
-              <Link to="/shop">
+              <Link to="/orders">
                 <Button className="btn-primary w-full sm:w-auto">
-                  Continue Shopping
+                  View My Orders
                 </Button>
               </Link>
-              <Link to="/">
+              <Link to="/shop">
                 <Button variant="outline" className="w-full sm:w-auto">
-                  Back to Home
+                  Continue Shopping
                 </Button>
               </Link>
             </div>
@@ -102,6 +219,15 @@ const Checkout: React.FC = () => {
           Back to Cart
         </Link>
 
+        {!user && (
+          <div className="mb-8 p-4 bg-primary/10 rounded-xl">
+            <p className="text-sm">
+              <Link to="/auth" className="text-primary font-medium hover:underline">Login</Link>
+              {' '}to save your order history and get faster checkout next time!
+            </p>
+          </div>
+        )}
+
         <div className="grid lg:grid-cols-2 gap-12">
           {/* Delivery Form */}
           <div>
@@ -118,6 +244,7 @@ const Checkout: React.FC = () => {
                     onChange={handleInputChange}
                     placeholder="John Doe"
                     className="input-grocery"
+                    disabled={isSubmitting}
                   />
                 </div>
                 <div className="space-y-2">
@@ -130,6 +257,7 @@ const Checkout: React.FC = () => {
                     onChange={handleInputChange}
                     placeholder="john@example.com"
                     className="input-grocery"
+                    disabled={isSubmitting}
                   />
                 </div>
               </div>
@@ -143,6 +271,7 @@ const Checkout: React.FC = () => {
                   onChange={handleInputChange}
                   placeholder="+91 98765 43210"
                   className="input-grocery"
+                  disabled={isSubmitting}
                 />
               </div>
 
@@ -155,6 +284,7 @@ const Checkout: React.FC = () => {
                   onChange={handleInputChange}
                   placeholder="123, Street Name, Area"
                   className="input-grocery"
+                  disabled={isSubmitting}
                 />
               </div>
 
@@ -168,6 +298,7 @@ const Checkout: React.FC = () => {
                     onChange={handleInputChange}
                     placeholder="Mumbai"
                     className="input-grocery"
+                    disabled={isSubmitting}
                   />
                 </div>
                 <div className="space-y-2">
@@ -179,6 +310,7 @@ const Checkout: React.FC = () => {
                     onChange={handleInputChange}
                     placeholder="400001"
                     className="input-grocery"
+                    disabled={isSubmitting}
                   />
                 </div>
               </div>
@@ -195,8 +327,20 @@ const Checkout: React.FC = () => {
                 </div>
               </div>
 
-              <Button type="submit" className="w-full btn-primary" size="lg">
-                Place Order - ₹{grandTotal.toFixed(2)}
+              <Button 
+                type="submit" 
+                className="w-full btn-primary" 
+                size="lg"
+                disabled={isSubmitting}
+              >
+                {isSubmitting ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin mr-2" />
+                    Placing Order...
+                  </>
+                ) : (
+                  `Place Order - ₹${grandTotal.toFixed(2)}`
+                )}
               </Button>
             </form>
           </div>
